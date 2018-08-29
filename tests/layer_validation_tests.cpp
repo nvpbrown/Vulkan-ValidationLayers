@@ -5942,22 +5942,24 @@ TEST_F(VkLayerTest, PointSizeFailure) {
     TEST_DESCRIPTION("Create a pipeline using TOPOLOGY_POINT_LIST but do not set PointSize in vertex shader.");
 
     ASSERT_NO_FATAL_FAILURE(Init());
-    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "InputAssemblyState topology is set to POINT_LIST");
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "Pipeline topology is set to POINT_LIST");
 
     ASSERT_NO_FATAL_FAILURE(InitViewport());
 
+    // Create VS declaring PointSize but not writing to it
     static const char NoPointSizeVertShader[] =
         "#version 450\n"
         "vec2 vertices[3];\n"
         "out gl_PerVertex\n"
         "{\n"
         "    vec4 gl_Position;\n"
+        "    float gl_PointSize;\n"
         "};\n"
         "void main() {\n"
-        "      vertices[0] = vec2(-1.0, -1.0);\n"
-        "      vertices[1] = vec2( 1.0, -1.0);\n"
-        "      vertices[2] = vec2( 0.0,  1.0);\n"
-        "   gl_Position = vec4(vertices[gl_VertexIndex % 3], 0.0, 1.0);\n"
+        "    vertices[0] = vec2(-1.0, -1.0);\n"
+        "    vertices[1] = vec2( 1.0, -1.0);\n"
+        "    vertices[2] = vec2( 0.0,  1.0);\n"
+        "    gl_Position = vec4(vertices[gl_VertexIndex % 3], 0.0, 1.0);\n"
         "}\n";
 
     VkShaderObj vs(m_device, NoPointSizeVertShader, VK_SHADER_STAGE_VERTEX_BIT, this);
@@ -5966,6 +5968,73 @@ TEST_F(VkLayerTest, PointSizeFailure) {
     VkPipelineObj pipelineobj(m_device);
     pipelineobj.AddDefaultColorAttachment();
     pipelineobj.AddShader(&vs);
+    pipelineobj.AddShader(&ps);
+
+    // Set Input Assembly to TOPOLOGY POINT LIST
+    VkPipelineInputAssemblyStateCreateInfo ia_state = {};
+    ia_state.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia_state.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    pipelineobj.SetInputAssembly(&ia_state);
+
+    ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+    m_commandBuffer->begin();
+    m_commandBuffer->ClearAllBuffers(m_renderTargets, m_clear_color, m_depthStencil, m_depth_clear_color, m_stencil_clear_color);
+    m_commandBuffer->PrepareAttachments(m_renderTargets, m_depthStencil);
+    VkDescriptorSetObj descriptorSet(m_device);
+    descriptorSet.CreateVKDescriptorSet(m_commandBuffer);
+    pipelineobj.CreateVKPipeline(descriptorSet.GetPipelineLayout(), renderPass());
+    m_errorMonitor->VerifyFound();
+}
+
+TEST_F(VkLayerTest, PointSizeGeomShaderFailure) {
+    TEST_DESCRIPTION(
+        "Create a pipeline using TOPOLOGY_POINT_LIST, set PointSize vertex shader, but not in the final geometry stage.");
+
+    ASSERT_NO_FATAL_FAILURE(Init());
+
+    if ((!m_device->phy().features().geometryShader) || (!m_device->phy().features().shaderTessellationAndGeometryPointSize)) {
+        printf("%s Device does not support the required geometry shader features; skipped.\n", kSkipPrefix);
+        return;
+    }
+
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "Pipeline topology is set to POINT_LIST");
+
+    ASSERT_NO_FATAL_FAILURE(InitViewport());
+
+    // Create VS declaring PointSize and writing to it
+    static const char PointSizeVertShader[] =
+        "#version 450\n"
+        "vec2 vertices[3];\n"
+        "out gl_PerVertex\n"
+        "{\n"
+        "    vec4 gl_Position;\n"
+        "    float gl_PointSize;\n"
+        "};\n"
+        "void main() {\n"
+        "    vertices[0] = vec2(-1.0, -1.0);\n"
+        "    vertices[1] = vec2( 1.0, -1.0);\n"
+        "    vertices[2] = vec2( 0.0,  1.0);\n"
+        "    gl_Position = vec4(vertices[gl_VertexIndex % 3], 0.0, 1.0);\n"
+        "    gl_PointSize = 5.0;\n"
+        "}\n";
+    static char const *gsSource =
+        "#version 450\n"
+        "layout (points) in;\n"
+        "layout (points) out;\n"
+        "layout (max_vertices = 1) out;\n"
+        "void main() {\n"
+        "   gl_Position = vec4(1.0, 0.5, 0.5, 0.0);\n"
+        "   EmitVertex();\n"
+        "}\n";
+
+    VkShaderObj vs(m_device, PointSizeVertShader, VK_SHADER_STAGE_VERTEX_BIT, this);
+    VkShaderObj gs(m_device, gsSource, VK_SHADER_STAGE_GEOMETRY_BIT, this);
+    VkShaderObj ps(m_device, bindStateFragShaderText, VK_SHADER_STAGE_FRAGMENT_BIT, this);
+
+    VkPipelineObj pipelineobj(m_device);
+    pipelineobj.AddDefaultColorAttachment();
+    pipelineobj.AddShader(&vs);
+    pipelineobj.AddShader(&gs);
     pipelineobj.AddShader(&ps);
 
     // Set Input Assembly to TOPOLOGY POINT LIST
@@ -19414,6 +19483,65 @@ TEST_F(VkLayerTest, DrawTimeImageMultisampleMismatchWithPipeline) {
     m_commandBuffer->end();
 }
 
+TEST_F(VkLayerTest, DrawTimeImageComponentTypeMismatchWithPipeline) {
+    TEST_DESCRIPTION(
+        "Test that an error is produced when the component type of an imageview disagrees with the type in the shader.");
+
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "SINT component type, but bound descriptor");
+
+    ASSERT_NO_FATAL_FAILURE(Init());
+    ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+
+    char const *vsSource =
+        "#version 450\n"
+        "\n"
+        "void main() { gl_Position = vec4(0); }\n";
+    char const *fsSource =
+        "#version 450\n"
+        "\n"
+        "layout(set=0, binding=0) uniform isampler2D s;\n"
+        "layout(location=0) out vec4 color;\n"
+        "void main() {\n"
+        "   color = texelFetch(s, ivec2(0), 0);\n"
+        "}\n";
+    VkShaderObj vs(m_device, vsSource, VK_SHADER_STAGE_VERTEX_BIT, this);
+    VkShaderObj fs(m_device, fsSource, VK_SHADER_STAGE_FRAGMENT_BIT, this);
+
+    VkPipelineObj pipe(m_device);
+    pipe.AddShader(&vs);
+    pipe.AddShader(&fs);
+    pipe.AddDefaultColorAttachment();
+
+    VkTextureObj texture(m_device, nullptr);  // UNORM texture by default, incompatible with isampler2D
+    VkSamplerObj sampler(m_device);
+
+    VkDescriptorSetObj descriptorSet(m_device);
+    descriptorSet.AppendSamplerTexture(&sampler, &texture);
+    descriptorSet.CreateVKDescriptorSet(m_commandBuffer);
+
+    VkResult err = pipe.CreateVKPipeline(descriptorSet.GetPipelineLayout(), renderPass());
+    ASSERT_VK_SUCCESS(err);
+
+    m_commandBuffer->begin();
+    m_commandBuffer->BeginRenderPass(m_renderPassBeginInfo);
+
+    vkCmdBindPipeline(m_commandBuffer->handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe.handle());
+    m_commandBuffer->BindDescriptorSet(descriptorSet);
+
+    VkViewport viewport = {0, 0, 16, 16, 0, 1};
+    vkCmdSetViewport(m_commandBuffer->handle(), 0, 1, &viewport);
+    VkRect2D scissor = {{0, 0}, {16, 16}};
+    vkCmdSetScissor(m_commandBuffer->handle(), 0, 1, &scissor);
+
+    // error produced here.
+    vkCmdDraw(m_commandBuffer->handle(), 3, 1, 0, 0);
+
+    m_errorMonitor->VerifyFound();
+
+    m_commandBuffer->EndRenderPass();
+    m_commandBuffer->end();
+}
+
 TEST_F(VkLayerTest, AttachmentDescriptionUndefinedFormat) {
     TEST_DESCRIPTION("Create a render pass with an attachment description format set to VK_FORMAT_UNDEFINED");
 
@@ -23874,10 +24002,358 @@ TEST_F(VkLayerTest, SetDynViewportParamMultiviewportTests) {
     m_errorMonitor->VerifyFound();
 }
 
+TEST_F(VkLayerTest, AndroidHardwareBufferImageViewErrors) {
+    TEST_DESCRIPTION("Attempt to create an ImageView on an external Android Hardware Buffer image, with a variety of errors in the VkImageViewCreateInfo chain.");
+
+    if (InstanceExtensionSupported(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME) &&
+        InstanceExtensionSupported(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME)) {
+        m_instance_extension_names.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+        m_instance_extension_names.push_back(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
+    } else {
+        printf("%s  Required instance extension VK_KHR_get_physical_device_properties2 or VK_KHR_external_memory_capabilities not supported -- skipping test\n", kSkipPrefix);
+        return;
+    }
+    ASSERT_NO_FATAL_FAILURE(InitFramework(myDbgFunc, m_errorMonitor));
+
+    if (DeviceExtensionSupported(gpu(), nullptr, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME) &&
+        DeviceExtensionSupported(gpu(), nullptr, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME)) {
+            m_device_extension_names.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+            m_device_extension_names.push_back(VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+            m_device_extension_names.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+            m_device_extension_names.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+            m_device_extension_names.push_back(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+            m_device_extension_names.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+            m_device_extension_names.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+            //m_device_extension_names.push_back(VK_);
+            //m_device_extension_names.push_back(VK_);
+
+    } else {
+        printf("%s Required device extension VK_KHR_sampler_ycbcr_conversion or VK_ANDROID_external_memory_android_hardware_buffer (or their prerequisites) not supported -- skipping test\n", kSkipPrefix);
+        return;
+    }
+    ASSERT_NO_FATAL_FAILURE(InitState());
+
+    // Create a YCbCr conversion obj with a chained external format
+    VkExternalFormatANDROID ext_fmt = {};
+    ext_fmt.sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID;
+    ext_fmt.externalFormat = 0xDEADBEEF;
+
+    VkSamplerYcbcrConversionCreateInfo ycci = {};
+    ycci.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO;
+    ycci.pNext = &ext_fmt;  // chain external format
+    ycci.format = VK_FORMAT_UNDEFINED;
+    ycci.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_IDENTITY;
+    ycci.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
+    ycci.xChromaOffset = VK_CHROMA_LOCATION_COSITED_EVEN;
+    ycci.yChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
+    ycci.chromaFilter = VK_FILTER_NEAREST;
+    ycci.forceExplicitReconstruction = VK_FALSE;
+
+    VkSamplerYcbcrConversion ycbcr_conversion  = VK_NULL_HANDLE;
+    vkCreateSamplerYcbcrConversion(m_device->device(), &ycci, NULL, &ycbcr_conversion);
+
+    // Create a target image
+    VkImageCreateInfo ici = {};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.pNext = &ext_fmt;
+    ici.format = VK_FORMAT_UNDEFINED;
+    ici.extent = { 1024, 1024, 1 };
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ici.arrayLayers = 1;
+    ici.mipLevels = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkImage image;
+    vkCreateImage(m_device->device(), &ici, NULL, &image);
+
+    // Create an image view with errors 
+    VkImageViewCreateInfo ivci = {};
+    ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ivci.pNext = &ext_fmt;
+    ivci.image = image;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = VK_FORMAT_UNDEFINED;
+    ivci.subresourceRange.baseMipLevel = 0;
+    ivci.subresourceRange.levelCount = 1;
+    ivci.subresourceRange.layerCount = 1;
+    ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+    VkImageView view = VK_NULL_HANDLE;
+
+    // No error sanity check
+    m_errorMonitor->ExpectSuccess();
+    vkCreateImageView(m_device->device(), &ivci, NULL, &view);
+    m_errorMonitor->VerifyNotFound();
+    if (view) vkDestroyImageView(m_device->device(), view, NULL);
+    view = VK_NULL_HANDLE;
+
+    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "VUID-VkImageViewCreateInfo-image-01896");
+    vkCreateImageView(m_device->device(), &ivci, NULL, &view);
+    m_errorMonitor->VerifyFound();
+    if (view) vkDestroyImageView(m_device->device(), view, NULL);
+    view = VK_NULL_HANDLE;
+
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "VUID-VkImageViewCreateInfo-image-01896");
+    //vkCreateImageView(m_device->device(), &ivci, NULL, &view);
+    //m_errorMonitor->VerifyFound();
+    //if (view) vkDestroyImageView(m_device->device(), view, NULL);
+    //view = VK_NULL_HANDLE;
+
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "VUID-VkImageViewCreateInfo-image-01896");
+    //vkCreateImageView(m_device->device(), &ivci, NULL, &view);
+    //m_errorMonitor->VerifyFound();
+    //if (view) vkDestroyImageView(m_device->device(), view, NULL);
+    //view = VK_NULL_HANDLE;
+
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "VUID-VkImageViewCreateInfo-image-01896");
+    //vkCreateImageView(m_device->device(), &ivci, NULL, &view);
+    //m_errorMonitor->VerifyFound();
+    //if (view) vkDestroyImageView(m_device->device(), view, NULL);
+    //view = VK_NULL_HANDLE;
+
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "VUID-VkImageViewCreateInfo-image-01896");
+    //vkCreateImageView(m_device->device(), &ivci, NULL, &view);
+    //m_errorMonitor->VerifyFound();
+    //if (view) vkDestroyImageView(m_device->device(), view, NULL);
+    //view = VK_NULL_HANDLE;
+
+    if (ycbcr_conversion) vkDestroySamplerYcbcrConversion(m_device->device(), ycbcr_conversion, NULL);
+    if (image) vkDestroyImage(m_device->device(), image, NULL);
+}
+
+
 //
 // POSITIVE VALIDATION TESTS
 //
 // These tests do not expect to encounter ANY validation errors pass only if this is true
+
+TEST_F(VkPositiveLayerTest, PointSizeWriteInFunction) {
+    TEST_DESCRIPTION("Create a pipeline using TOPOLOGY_POINT_LIST and write PointSize in vertex shader function.");
+
+    ASSERT_NO_FATAL_FAILURE(Init());
+    m_errorMonitor->ExpectSuccess();
+
+    ASSERT_NO_FATAL_FAILURE(InitViewport());
+
+    // Create VS declaring PointSize and write to it in a function call.
+    static const char PointSizeWriteVertShaderFcn[] =
+        "#version 450\n"
+        "vec2 vertices[3];\n"
+        "out gl_PerVertex\n"
+        "{\n"
+        "    vec4 gl_Position;\n"
+        "    float gl_PointSize;\n"
+        "};\n"
+        "void OutPointSize() {\n"
+        "   gl_PointSize = 7.0;\n"
+        "}\n"
+        "void main() {\n"
+        "    vertices[0] = vec2(-1.0, -1.0);\n"
+        "    vertices[1] = vec2( 1.0, -1.0);\n"
+        "    vertices[2] = vec2( 0.0,  1.0);\n"
+        "    gl_Position = vec4(vertices[gl_VertexIndex % 3], 0.0, 1.0);\n"
+        "    OutPointSize();\n"
+        "}\n";
+
+    VkShaderObj vs(m_device, PointSizeWriteVertShaderFcn, VK_SHADER_STAGE_VERTEX_BIT, this);
+    VkShaderObj ps(m_device, bindStateFragShaderText, VK_SHADER_STAGE_FRAGMENT_BIT, this);
+
+    {
+        VkPipelineObj pipelineobj(m_device);
+        pipelineobj.AddDefaultColorAttachment();
+        pipelineobj.AddShader(&vs);
+        pipelineobj.AddShader(&ps);
+
+        // Set Input Assembly to TOPOLOGY POINT LIST
+        VkPipelineInputAssemblyStateCreateInfo ia_state = {};
+        ia_state.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        ia_state.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        pipelineobj.SetInputAssembly(&ia_state);
+
+        ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+        m_commandBuffer->begin();
+        m_commandBuffer->ClearAllBuffers(m_renderTargets, m_clear_color, m_depthStencil, m_depth_clear_color,
+                                         m_stencil_clear_color);
+        m_commandBuffer->PrepareAttachments(m_renderTargets, m_depthStencil);
+        VkDescriptorSetObj descriptorSet(m_device);
+        descriptorSet.CreateVKDescriptorSet(m_commandBuffer);
+        pipelineobj.CreateVKPipeline(descriptorSet.GetPipelineLayout(), renderPass());
+    }
+    m_errorMonitor->VerifyNotFound();
+}
+
+TEST_F(VkPositiveLayerTest, PointSizeGeomShaderSuccess) {
+    TEST_DESCRIPTION(
+        "Create a pipeline using TOPOLOGY_POINT_LIST, set PointSize vertex shader, and write in the final geometry stage.");
+
+    ASSERT_NO_FATAL_FAILURE(Init());
+    m_errorMonitor->ExpectSuccess();
+
+    if ((!m_device->phy().features().geometryShader) || (!m_device->phy().features().shaderTessellationAndGeometryPointSize)) {
+        printf("%s Device does not support the required geometry shader features; skipped.\n", kSkipPrefix);
+        return;
+    }
+
+    ASSERT_NO_FATAL_FAILURE(InitViewport());
+
+    // Create VS declaring PointSize and writing to it
+    static const char PointSizeVertShader[] =
+        "#version 450\n"
+        "vec2 vertices[3];\n"
+        "out gl_PerVertex\n"
+        "{\n"
+        "    vec4 gl_Position;\n"
+        "    float gl_PointSize;\n"
+        "};\n"
+        "void main() {\n"
+        "    vertices[0] = vec2(-1.0, -1.0);\n"
+        "    vertices[1] = vec2( 1.0, -1.0);\n"
+        "    vertices[2] = vec2( 0.0,  1.0);\n"
+        "    gl_Position = vec4(vertices[gl_VertexIndex % 3], 0.0, 1.0);\n"
+        "    gl_PointSize = 5.0;\n"
+        "}\n";
+    static char const *gsSource =
+        "#version 450\n"
+        "layout (points) in;\n"
+        "layout (points) out;\n"
+        "layout (max_vertices = 1) out;\n"
+        "void main() {\n"
+        "   gl_Position = vec4(1.0, 0.5, 0.5, 0.0);\n"
+        "   gl_PointSize = 3.3;\n"
+        "   EmitVertex();\n"
+        "}\n";
+
+    VkShaderObj vs(m_device, PointSizeVertShader, VK_SHADER_STAGE_VERTEX_BIT, this);
+    VkShaderObj gs(m_device, gsSource, VK_SHADER_STAGE_GEOMETRY_BIT, this);
+    VkShaderObj ps(m_device, bindStateFragShaderText, VK_SHADER_STAGE_FRAGMENT_BIT, this);
+
+    VkPipelineObj pipelineobj(m_device);
+    pipelineobj.AddDefaultColorAttachment();
+    pipelineobj.AddShader(&vs);
+    pipelineobj.AddShader(&gs);
+    pipelineobj.AddShader(&ps);
+
+    // Set Input Assembly to TOPOLOGY POINT LIST
+    VkPipelineInputAssemblyStateCreateInfo ia_state = {};
+    ia_state.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia_state.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    pipelineobj.SetInputAssembly(&ia_state);
+
+    ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+    m_commandBuffer->begin();
+    m_commandBuffer->ClearAllBuffers(m_renderTargets, m_clear_color, m_depthStencil, m_depth_clear_color, m_stencil_clear_color);
+    m_commandBuffer->PrepareAttachments(m_renderTargets, m_depthStencil);
+    VkDescriptorSetObj descriptorSet(m_device);
+    descriptorSet.CreateVKDescriptorSet(m_commandBuffer);
+    pipelineobj.CreateVKPipeline(descriptorSet.GetPipelineLayout(), renderPass());
+    m_errorMonitor->VerifyNotFound();
+}
+
+TEST_F(VkPositiveLayerTest, LoosePointSizeWrite) {
+    TEST_DESCRIPTION("Create a pipeline using TOPOLOGY_POINT_LIST and write PointSize outside of a structure.");
+
+    ASSERT_NO_FATAL_FAILURE(Init());
+    m_errorMonitor->ExpectSuccess();
+
+    ASSERT_NO_FATAL_FAILURE(InitViewport());
+
+    const std::string LoosePointSizeWrite = R"(
+                                       OpCapability Shader
+                                  %1 = OpExtInstImport "GLSL.std.450"
+                                       OpMemoryModel Logical GLSL450
+                                       OpEntryPoint Vertex %main "main" %glposition %glpointsize %gl_VertexIndex
+                                       OpSource GLSL 450
+                                       OpName %main "main"
+                                       OpName %vertices "vertices"
+                                       OpName %glposition "glposition"
+                                       OpName %glpointsize "glpointsize"
+                                       OpName %gl_VertexIndex "gl_VertexIndex"
+                                       OpDecorate %glposition BuiltIn Position
+                                       OpDecorate %glpointsize BuiltIn PointSize
+                                       OpDecorate %gl_VertexIndex BuiltIn VertexIndex
+                               %void = OpTypeVoid
+                                  %3 = OpTypeFunction %void
+                              %float = OpTypeFloat 32
+                            %v2float = OpTypeVector %float 2
+                               %uint = OpTypeInt 32 0
+                             %uint_3 = OpConstant %uint 3
+                %_arr_v2float_uint_3 = OpTypeArray %v2float %uint_3
+   %_ptr_Private__arr_v2float_uint_3 = OpTypePointer Private %_arr_v2float_uint_3
+                           %vertices = OpVariable %_ptr_Private__arr_v2float_uint_3 Private
+                                %int = OpTypeInt 32 1
+                              %int_0 = OpConstant %int 0
+                           %float_n1 = OpConstant %float -1
+                                 %16 = OpConstantComposite %v2float %float_n1 %float_n1
+               %_ptr_Private_v2float = OpTypePointer Private %v2float
+                              %int_1 = OpConstant %int 1
+                            %float_1 = OpConstant %float 1
+                                 %21 = OpConstantComposite %v2float %float_1 %float_n1
+                              %int_2 = OpConstant %int 2
+                            %float_0 = OpConstant %float 0
+                                 %25 = OpConstantComposite %v2float %float_0 %float_1
+                            %v4float = OpTypeVector %float 4
+            %_ptr_Output_gl_Position = OpTypePointer Output %v4float
+                         %glposition = OpVariable %_ptr_Output_gl_Position Output
+           %_ptr_Output_gl_PointSize = OpTypePointer Output %float
+                        %glpointsize = OpVariable %_ptr_Output_gl_PointSize Output
+                     %_ptr_Input_int = OpTypePointer Input %int
+                     %gl_VertexIndex = OpVariable %_ptr_Input_int Input
+                              %int_3 = OpConstant %int 3
+                %_ptr_Output_v4float = OpTypePointer Output %v4float
+                  %_ptr_Output_float = OpTypePointer Output %float
+                               %main = OpFunction %void None %3
+                                  %5 = OpLabel
+                                 %18 = OpAccessChain %_ptr_Private_v2float %vertices %int_0
+                                       OpStore %18 %16
+                                 %22 = OpAccessChain %_ptr_Private_v2float %vertices %int_1
+                                       OpStore %22 %21
+                                 %26 = OpAccessChain %_ptr_Private_v2float %vertices %int_2
+                                       OpStore %26 %25
+                                 %33 = OpLoad %int %gl_VertexIndex
+                                 %35 = OpSMod %int %33 %int_3
+                                 %36 = OpAccessChain %_ptr_Private_v2float %vertices %35
+                                 %37 = OpLoad %v2float %36
+                                 %38 = OpCompositeExtract %float %37 0
+                                 %39 = OpCompositeExtract %float %37 1
+                                 %40 = OpCompositeConstruct %v4float %38 %39 %float_0 %float_1
+                                 %42 = OpAccessChain %_ptr_Output_v4float %glposition
+                                       OpStore %42 %40
+                                       OpStore %glpointsize %float_1
+                                       OpReturn
+                                       OpFunctionEnd
+        )";
+
+    // Create VS declaring PointSize and write to it in a function call.
+    VkShaderObj vs(m_device, LoosePointSizeWrite, VK_SHADER_STAGE_VERTEX_BIT, this);
+    VkShaderObj ps(m_device, bindStateFragShaderText, VK_SHADER_STAGE_FRAGMENT_BIT, this);
+
+    {
+        VkPipelineObj pipelineobj(m_device);
+        pipelineobj.AddDefaultColorAttachment();
+        pipelineobj.AddShader(&vs);
+        pipelineobj.AddShader(&ps);
+
+        // Set Input Assembly to TOPOLOGY POINT LIST
+        VkPipelineInputAssemblyStateCreateInfo ia_state = {};
+        ia_state.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        ia_state.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        pipelineobj.SetInputAssembly(&ia_state);
+
+        ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+        m_commandBuffer->begin();
+        m_commandBuffer->ClearAllBuffers(m_renderTargets, m_clear_color, m_depthStencil, m_depth_clear_color,
+                                         m_stencil_clear_color);
+        m_commandBuffer->PrepareAttachments(m_renderTargets, m_depthStencil);
+        VkDescriptorSetObj descriptorSet(m_device);
+        descriptorSet.CreateVKDescriptorSet(m_commandBuffer);
+        pipelineobj.CreateVKPipeline(descriptorSet.GetPipelineLayout(), renderPass());
+    }
+    m_errorMonitor->VerifyNotFound();
+}
 
 TEST_F(VkPositiveLayerTest, UncompressedToCompressedImageCopy) {
     TEST_DESCRIPTION("Image copies between compressed and uncompressed images");
