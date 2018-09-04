@@ -222,6 +222,11 @@ if(WIN32)
     endif()
 elseif(UNIX)   # UNIX includes APPLE
     foreach(TARGET_NAME ${TARGET_NAMES})
+        add_custom_target(${config_file}-staging-json ALL
+                          COMMAND sed -i -e "/\"library_path\":/s$./libVkLayer$libVkLayer$"
+                                  ${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.json
+                          VERBATIM
+                          DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.json)
         install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.json DESTINATION
             ${CMAKE_INSTALL_DATAROOTDIR}/vulkan/explicit_layer.d
         )
